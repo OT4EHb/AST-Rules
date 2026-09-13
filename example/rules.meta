@@ -1,0 +1,33 @@
+rule null_to_nullptr {
+  phase: migration
+  priority: 100
+  match:
+    node: NullLiteral
+  replace:
+    nullptr
+  risk: SAFE
+}
+
+rule bfs_expansion {
+  phase: dsl
+  priority: 200
+  match:
+    node: BFS
+  generate:
+  <<<
+    {
+      std::queue<Node*> q;
+      q.push(&${from});
+      ${from}.visited = true;
+      while (!q.empty()) {
+        Node* parent = q.front(); q.pop();
+        for (Node* neighbor : parent->neighbors) {
+          if (!neighbor->visited) {
+            neighbor->visited = true;
+            q.push(neighbor);
+          }
+        }
+      }
+    }
+  >>>
+}
