@@ -1,16 +1,11 @@
 rule null_to_nullptr {
-  phase: migration
-  priority: 100
   match:
     node: NullLiteral
   replace:
     nullptr
-  risk: SAFE
 }
 
 rule bfs_expansion {
-  phase: dsl
-  priority: 200
   match:
     node: BFS
   generate:

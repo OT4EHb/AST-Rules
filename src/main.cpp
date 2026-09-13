@@ -23,8 +23,11 @@ const char* CPP_GRAMMAR = R"que(
   Param       <- Type _ Ident
 
   VarDecl     <- Type _ Ident _ "=" _ Expr _ ";" _
+
   IfStmt      <- "if" _ "(" _ Expr _ ")" _ Block
+
   ReturnStmt  <- "return" _ Expr? _ ";" _
+
   ExprStmt    <- Expr _ ";" _
   Block       <- "{" _ Statement* _ "}" _
 
@@ -34,14 +37,14 @@ const char* CPP_GRAMMAR = R"que(
   Expr        <- AssignExpr
   AssignExpr  <- Comparison (_ "=" _ AssignExpr)?
   Comparison  <- Primary (_ "==" _ Primary)?
-  Primary     <- DslTerm / Call / NullLiteral / Ident / NumLiteral / "(" _ Expr _ ")" / "&" _ Ident
+  Primary     <- DslTerms / Call / NullLiteral / Ident / NumLiteral / "(" _ Expr _ ")" / "&" _ Ident
 
   Call        <- Ident _ "(" _ Args? _ ")"
   Args        <- Expr ("," _ Expr)*
 
   NullLiteral <- "NULL"
-  NumLiteral  <- < [0-9]+ >
-  Ident       <- < [a-zA-Z_][a-zA-Z0-9_]* >
+  NumLiteral  <- [0-9]+
+  Ident       <- [a-zA-Z_][a-zA-Z0-9_]*
 
   _           <- [ \t\r\n]*
 )que";
@@ -64,13 +67,6 @@ const char* CPP_GRAMMAR = R"que(
     // DslBFS описано во внешней грамматике.
 
     // Заменяем "DslTerm" в CPP_GRAMMAR на конкретные правила из внешней
-    size_t pos = combined.find("Primary     <- DslTerm");
-    if (pos != std::string::npos) {
-        // Подставляем внешние DSL-термины вместо DslTerm
-        // Предполагаем, что внешняя грамматика содержит правило BFS
-        combined.replace(pos, std::string("Primary     <- DslTerm").size(),
-                         "Primary     <- BFS / Call / NullLiteral / Ident / NumLiteral");
-    }
 
     // Добавляем внешние правила в конец
     combined += "\n\n" + external_dsl;
@@ -84,12 +80,9 @@ const char* CPP_GRAMMAR = R"que(
 
 struct Rule {
     std::string name;
-    std::string phase;
-    int priority = 0;
     std::string match_node;
     std::string action;        // "replace" или "generate"
     std::string action_text;
-    std::string risk;
 };
 
 // ============================================================
@@ -98,19 +91,15 @@ struct Rule {
 
 const char *RULES_GRAMMAR = R"(
   Rules       <- _ Rule* _
-  Rule        <- "rule" _ Ident _ "{" _ RuleBody _ "}"
-  RuleBody    <- (Phase / Priority / Match / Replace / Generate / Risk)*
-  Phase       <- "phase" _ ":" _ Ident _ ";"? _
-  Priority    <- "priority" _ ":" _ Number _ ";"? _
-  Match       <- "match" _ ":" _ MatchBody _
-  MatchBody   <- "node" _ ":" _ Ident _ ";"? _
-  Replace     <- "replace" _ ":" _ ReplaceBody _
-  ReplaceBody <- < [^\n]+ > _
-  Generate    <- "generate" _ ":" _ GenerateBody _
+  Rule        <- "rule" _ Ident _ "{" _ RuleBody _ "}" _
+  RuleBody    <- Match (Replace / Generate)
+  Match       <- "match:" _ MatchBody _
+  MatchBody   <- "node:" _ Ident _ ";"? _
+  Replace     <- "replace:" _ ReplaceBody _
+  ReplaceBody <- <[^\n]+ > _
+  Generate    <- "generate:" _ GenerateBody _
   GenerateBody<- "<<<" < (!">>>" .)* > ">>>" _
-  Risk        <- "risk" _ ":" _ Ident _ ";"? _
-  Ident       <- < [a-zA-Z_][a-zA-Z0-9_]* >
-  Number      <- < [0-9]+ >
+  Ident       <- [a-zA-Z_][a-zA-Z0-9_]*
   _           <- [ \t\r\n]*
 )";
 
@@ -132,12 +121,9 @@ std::string read_file(const std::string &path) {
 
 std::vector<Rule> parse_rules(const std::string &rules_text) {
     peg::parser parser;
-    /*parser.set_logger([](size_t line, size_t col, const std::string &msg) {
+    parser.set_logger([](size_t line, size_t col, const std::string &msg) {
         std::cerr << "Ошибка парсинга на " << line << ":" << col << " - " << msg << "\n";
-    });*/
-    parser.set_logger(static_cast<peg::Log>([](size_t line, size_t col, const std::string &msg, const std::string &rule) {
-        std::cerr << "[" << rule << "] " << line << ":" << col << " - " << msg << "\n";
-    }));
+    });
     parser.load_grammar(RULES_GRAMMAR);
     parser.enable_ast();
 
@@ -152,32 +138,27 @@ std::vector<Rule> parse_rules(const std::string &rules_text) {
 
         Rule r;
         for (auto &child : node->nodes) {
-            if (child->name == "Ident" && r.name.empty()) r.name = child->token;
-            if (child->name == "Phase")    r.phase = child->token;
-            if (child->name == "Priority") r.priority = std::stoi(std::string(child->token));
-            if (child->name == "MatchBody") {
-                for (auto &m : child->nodes) {
-                    if (m->name == "Ident") r.match_node = m->token;
+            if (child->name == "Ident") r.name = child->token;
+            else if (child->name == "RuleBody") {
+                for (auto &ruleChild : child->nodes) {
+                    if (ruleChild->name == "Match") {
+                        for (auto &m : ruleChild->nodes[1]->nodes) {
+                            if (m->name == "Ident") r.match_node = m->token;
+                        }
+                    }
+                    else if (ruleChild->name == "Replace") {
+                        r.action = "replace";
+                        r.action_text = ruleChild->nodes[1]->token;
+                    }
+                    else if (ruleChild->name == "Generate") {
+                        r.action = "generate";
+                        r.action_text = ruleChild->nodes[1]->token;
+                    }
                 }
             }
-            if (child->name == "ReplaceBody") {
-                r.action = "replace";
-                r.action_text = child->token;
-            }
-            if (child->name == "GenerateBody") {
-                r.action = "generate";
-                r.action_text = child->token;
-            }
-            if (child->name == "Risk") r.risk = child->token;
         }
         rules.push_back(r);
     }
-
-    // Сортируем по приоритету (детерминированный порядок)
-    std::sort(rules.begin(), rules.end(),
-              [](const Rule &a, const Rule &b) {
-        return a.priority < b.priority;
-    });
 
     return rules;
 }
@@ -186,11 +167,23 @@ std::vector<Rule> parse_rules(const std::string &rules_text) {
 // ОБХОД AST С ПРИМЕНЕНИЕМ ПРАВИЛ
 // ============================================================
 
+std::string find_name(const std::shared_ptr<peg::Ast> &node) {
+    if (node->token != "") return std::string(node->token);
+    std::string res = "";
+    for (auto &i : node->nodes) {
+        res += find_name(i);
+    }
+    return res;
+}
+
 // Извлекает значение узла по имени (для подстановок в generate)
 std::string find_child_token(const std::shared_ptr<peg::Ast> &node,
                              const std::string &name) {
     for (auto &child : node->nodes) {
-        if (child->name == name) return std::string(child->token);
+        if (child->name == name)
+            return find_name(child);        
+        auto ret = find_child_token(child, name);
+        if (ret != "") return ret;
     }
     return "";
 }
@@ -239,6 +232,13 @@ void apply_rules(const std::shared_ptr<peg::Ast> &node,
     }
 }
 
+void print_ast(std::shared_ptr<peg::Ast> ast) {
+    for (auto &i : ast->nodes) {
+        print_ast(i);
+    }
+    std::cout << ast->name << '\n';
+}
+
 // ============================================================
 // MAIN
 // ============================================================
@@ -256,6 +256,11 @@ int main(int argc, char **argv) {
         std::string input_text = read_file(argv[3]);
 
         // 1. Объединяем встроенную C++ грамматику с внешней DSL
+        size_t pos = dsl_grammar.find("DslTerms <-");
+        if (pos == std::string::npos) {
+            std::cerr << "DslTerms <- not found\n";
+            return 1;
+        }
         std::string combined = build_combined_grammar(dsl_grammar);
         // 2. Парсим входной код
         peg::parser parser;
@@ -282,7 +287,7 @@ int main(int argc, char **argv) {
         // 4. Применяем правила
         std::string output;
         apply_rules(ast, rules, output);
-
+        std::cout << ast->token<<'\n';
         // 5. Выводим результат
         std::cout << output << "\n";
 
